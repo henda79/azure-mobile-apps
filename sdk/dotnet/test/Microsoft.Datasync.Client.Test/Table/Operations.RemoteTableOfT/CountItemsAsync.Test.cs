@@ -21,7 +21,7 @@ public class CountItemsAsync_Tests : BaseOperationTest
     /// <param name="totalCount"></param>
     /// <param name="nextLink"></param>
     /// <returns></returns>
-    private Page<JObject> CreatePageOfJsonItems(int count, long? totalCount = null, Uri nextLink = null)
+    private Page<JObject> CreatePageOfJsonItems(int count, long? totalCount = null, string nextLink = null)
     {
         List<JObject> items = new();
         List<IdEntity> entities = new();
@@ -112,5 +112,19 @@ public class CountItemsAsync_Tests : BaseOperationTest
         _ = AssertSingleRequest(HttpMethod.Get, tableEndpoint + $"?{CountArgs}");
         Assert.Equal(42, count);
     }
-}
 
+    [Fact]
+    [Trait("Method", "LongCountAsync")]
+    public async Task LongCountAsync_Count()
+    {
+        // Arrange
+        CreatePageOfJsonItems(1, 42);
+
+        // Act
+        var count = await table.LongCountAsync();
+
+        // Assert
+        _ = AssertSingleRequest(HttpMethod.Get, tableEndpoint + $"?{CountArgs}");
+        Assert.Equal(42, count);
+    }
+}

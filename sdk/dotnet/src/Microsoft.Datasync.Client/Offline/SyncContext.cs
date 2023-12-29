@@ -47,6 +47,7 @@ namespace Microsoft.Datasync.Client.Offline
         private readonly AsyncLock initializationLock = new();
         private readonly AsyncReaderWriterLock queueLock = new();
         private readonly AsyncLockDictionary tableLock = new();
+        private readonly AsyncLockDictionary itemLock = new();
 
         /// <summary>
         /// The Id generator to use for item.
@@ -203,8 +204,11 @@ namespace Microsoft.Datasync.Client.Offline
         {
             await EnsureContextIsInitializedAsync(cancellationToken).ConfigureAwait(false);
             string itemId = ServiceSerializer.GetId(instance);
-            var originalInstance = await GetItemAsync(tableName, itemId, cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException($"The item with ID '{itemId}' is not in the offline store.");
-            var operation = new DeleteOperation(tableName, itemId) { Item = originalInstance };
+
+            using IDisposable itemLock = await this.itemLock.AcquireAsync(itemId, cancellationToken).ConfigureAwait(false);
+            JObject originalInstance = await GetItemAsync(tableName, itemId, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidOperationException($"The item with ID '{itemId}' is not in the offline store.");
+            DeleteOperation operation = new(tableName, itemId) { Item = originalInstance };
 
             await EnqueueOperationAsync(operation, originalInstance, cancellationToken).ConfigureAwait(false);
         }
@@ -245,8 +249,6 @@ namespace Microsoft.Datasync.Client.Offline
         public async Task InsertItemAsync(string tableName, JObject instance, CancellationToken cancellationToken = default)
         {
             await EnsureContextIsInitializedAsync(cancellationToken).ConfigureAwait(false);
-
-            // We have to pre-generate the ID when doing offline work.
             string itemId = ServiceSerializer.GetId(instance, allowDefault: true);
             if (itemId == null)
             {
@@ -254,6 +256,8 @@ namespace Microsoft.Datasync.Client.Offline
                 instance = (JObject)instance.DeepClone();
                 instance[SystemProperties.JsonIdProperty] = itemId;
             }
+
+            using IDisposable itemLock = await this.itemLock.AcquireAsync(itemId, cancellationToken).ConfigureAwait(false);
             var operation = new InsertOperation(tableName, itemId);
             await EnqueueOperationAsync(operation, instance, cancellationToken).ConfigureAwait(false);
         }
@@ -275,6 +279,8 @@ namespace Microsoft.Datasync.Client.Offline
             {
                 instance[SystemProperties.JsonVersionProperty] = version;
             }
+
+            using IDisposable itemLock = await this.itemLock.AcquireAsync(itemId, cancellationToken).ConfigureAwait(false);
             var operation = new UpdateOperation(tableName, itemId);
             await EnqueueOperationAsync(operation, instance, cancellationToken).ConfigureAwait(false);
         }
@@ -459,41 +465,7 @@ namespace Microsoft.Datasync.Client.Offline
                 using (await queueLock.WriterLockAsync(cancellationToken).ConfigureAwait(false))
                 {
                     await OfflineStore.DeleteAsync(queryDescription, cancellationToken).ConfigureAwait(false);
-
-                    switch (options.TimestampUpdatePolicy)
-                    {
-                        case TimestampUpdatePolicy.Default:
-                            if (!string.IsNullOrEmpty(queryId))
-                            {
-                                await DeltaTokenStore.ResetDeltaTokenAsync(tableName, queryId, cancellationToken).ConfigureAwait(false);
-                            }
-                            break;
-                        case TimestampUpdatePolicy.NoUpdate:
-                            // Do not update the timestamp!
-                            break;
-                        case TimestampUpdatePolicy.UpdateToLastEntity:
-                            // Get the last entity (max UpdatedAt) in the table and update the timestamp to that value.
-                            var tsq = new QueryDescription(tableName) { IncludeTotalCount = false, Top = 1 };
-                            tsq.Ordering.Add(new OrderByNode(new MemberAccessNode(null, "updatedAt"), OrderByDirection.Descending));
-                            Page<JObject> page = await OfflineStore.GetPageAsync(tsq, cancellationToken).ConfigureAwait(false);
-                            try
-                            {
-                                var ts = DateTimeOffset.Parse(page?.Items?.LastOrDefault()?.Value<string>("updatedAt"));
-                                await DeltaTokenStore.SetDeltaTokenAsync(tableName, queryId, ts, cancellationToken).ConfigureAwait(false);
-                            }
-                            catch (Exception)
-                            {
-                                await DeltaTokenStore.ResetDeltaTokenAsync(tableName, queryId, cancellationToken).ConfigureAwait(false);
-                            }
-                            break;
-                        case TimestampUpdatePolicy.UpdateToNow:
-                            await DeltaTokenStore.SetDeltaTokenAsync(tableName, queryId, DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
-                            break;
-                        case TimestampUpdatePolicy.UpdateToEpoch:
-                            await DeltaTokenStore.ResetDeltaTokenAsync(tableName, queryId, cancellationToken).ConfigureAwait(false);
-                            break;
-
-                    }
+                    await SetDeltaTokenAsync(tableName, queryId, options, cancellationToken).ConfigureAwait(false);
                 }
             }
         }
@@ -544,19 +516,24 @@ namespace Microsoft.Datasync.Client.Offline
 
             // Process the queue - only use the QueueHandler (new logic) if maxThreads > 1
             SendPushStartedEvent();
-            var maxThreads = GetMaximumParallelOperations(options);
+            int maxThreads = GetMaximumParallelOperations(options);
+            long itemCount = 0;
             if (maxThreads == 1)
             {
                 try
                 {
-                    long itemCount = 0;
                     TableOperation operation = await OperationsQueue.PeekAsync(0, tableNames, cancellationToken).ConfigureAwait(false);
                     while (operation != null)
                     {
-                        SendItemWillBePushedEvent(operation.TableName, operation.ItemId, itemCount);
-                        bool isSuccessful = await ExecutePushOperationAsync(operation, batch, true, cancellationToken).ConfigureAwait(false);
-                        itemCount++;
-                        SendItemWasPushedEvent(operation.TableName, operation.ItemId, itemCount, isSuccessful);
+                        using (IDisposable itemLock = await this.itemLock.AcquireAsync(operation.ItemId, cancellationToken).ConfigureAwait(false))
+                        {
+                            // Get the operation again in case it changed while waiting for the lock.
+                            operation = await OperationsQueue.GetOperationByItemIdAsync(operation.TableName, operation.ItemId, cancellationToken).ConfigureAwait(false);
+                            SendItemWillBePushedEvent(operation.TableName, operation.ItemId, itemCount);
+                            bool isSuccessful = await ExecutePushOperationAsync(operation, batch, true, cancellationToken).ConfigureAwait(false);
+                            Interlocked.Increment(ref itemCount);
+                            SendItemWasPushedEvent(operation.TableName, operation.ItemId, itemCount, isSuccessful);
+                        }
                         if (batch.AbortReason.HasValue)
                         {
                             break;
@@ -571,16 +548,16 @@ namespace Microsoft.Datasync.Client.Offline
             }
             else
             {
-                var itemCount = new long[] { 0 };
                 QueueHandler queueHandler = new(maxThreads, async (operation) =>
                 {
-                    SendItemWillBePushedEvent(operation.TableName, operation.ItemId, itemCount[0]);
+                    using IDisposable itemLock = await this.itemLock.AcquireAsync(operation.ItemId, cancellationToken).ConfigureAwait(false);
+
+                    // Get the operation again in case it changed while waiting for the lock.
+                    operation = await OperationsQueue.GetOperationByItemIdAsync(operation.TableName, operation.ItemId, cancellationToken).ConfigureAwait(false);
+                    SendItemWillBePushedEvent(operation.TableName, operation.ItemId, itemCount);
                     bool isSuccessful = await ExecutePushOperationAsync(operation, batch, true, cancellationToken).ConfigureAwait(false);
-                    lock(itemCount)
-                    {
-                        itemCount[0]++;
-                    }
-                    SendItemWasPushedEvent(operation.TableName, operation.ItemId, itemCount[0], isSuccessful);
+                    Interlocked.Increment(ref itemCount);
+                    SendItemWasPushedEvent(operation.TableName, operation.ItemId, itemCount, isSuccessful);
                 });
                 try
                 {
@@ -603,7 +580,7 @@ namespace Microsoft.Datasync.Client.Offline
             PushStatus batchStatus = batch.AbortReason ?? PushStatus.Complete;
             try
             {
-                errors.AddRange(await batch.LoadErrorsAsync(cancellationToken).ConfigureAwait(false));
+                errors.AddRange(await batch.LoadErrorsAsync(tableNames, cancellationToken).ConfigureAwait(false));
             }
             catch (Exception ex)
             {
@@ -886,9 +863,19 @@ namespace Microsoft.Datasync.Client.Offline
                 }
             }
 
-            if (removeFromQueueOnSuccess && error == null)
+            if (error == null)
             {
-                await OperationsQueue.DeleteOperationByIdAsync(operation.Id, operation.Version, cancellationToken).ConfigureAwait(false);
+                if (removeFromQueueOnSuccess)
+                {
+                    await OperationsQueue.DeleteOperationByIdAsync(operation.Id, operation.Version, cancellationToken).ConfigureAwait(false);
+                }
+
+                IList<TableOperationError> errors = (await batch.LoadErrorsAsync(new string[] { operation.TableName }, cancellationToken).ConfigureAwait(false))
+                    .Where(e => (string)e.Item["id"] == operation.Id).ToList();
+                if (errors.Count > 0)
+                {
+                    await RemoveErrorsAsync(errors, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             return error == null;
@@ -920,6 +907,68 @@ namespace Microsoft.Datasync.Client.Offline
             => (options == null || options.ParallelOperations == 0)
             ? ServiceClient.ClientOptions.ParallelOperations
             : options.ParallelOperations;
+
+        /// <summary>
+        /// Sets the delta token for a query.  If the resetAssociatedQueries flag is set, then all the
+        /// queries for a specific table are reset in the same way.
+        /// </summary>
+        /// <param name="tableName">The name of the table</param>
+        /// <param name="queryId">The ID of the query</param>
+        /// <param name="options">A options for the purge operation.</param>
+        /// <param name="cancellationToken">A <see cref="CancellationToken"/> to observe.</param>
+        /// <returns>A task that completes when the operation is finished.</returns>
+        internal async Task SetDeltaTokenAsync(string tableName, string queryId, PurgeOptions options, CancellationToken cancellationToken = default)
+        {
+            DateTimeOffset? timestamp = null;
+            switch (options.TimestampUpdatePolicy)
+            {
+                case TimestampUpdatePolicy.NoUpdate:
+                    // Do not update the timestamp - this whole method becomes a no-op
+                    return;
+                case TimestampUpdatePolicy.UpdateToLastEntity:
+                    // Get the last entity (max UpdatedAt) in the table and update the timestamp to that value.
+                    var tsq = new QueryDescription(tableName) { IncludeTotalCount = false, Top = 1 };
+                    tsq.Ordering.Add(new OrderByNode(new MemberAccessNode(null, "updatedAt"), OrderByDirection.Descending));
+                    Page<JObject> page = await OfflineStore.GetPageAsync(tsq, cancellationToken).ConfigureAwait(false);
+                    if (page?.Items?.LastOrDefault() != null)
+                    {
+                        timestamp = DateTimeOffset.Parse(page?.Items?.LastOrDefault()?.Value<string>("updatedAt"));
+                    }
+                    break;
+                case TimestampUpdatePolicy.UpdateToNow:
+                    timestamp = DateTimeOffset.UtcNow;
+                    break;
+                    // Anything else resets the timestamp to the epoch.
+            }
+
+            if (timestamp.HasValue)
+            {
+                await DeltaTokenStore.SetDeltaTokenAsync(tableName, queryId, timestamp.Value, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await DeltaTokenStore.ResetDeltaTokenAsync(tableName, queryId, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (options.ResetAssociatedQueries)
+            {
+                var queryIds = (await DeltaTokenStore.GetDeltaTokenQueryIdsForTableAsync(tableName, cancellationToken).ConfigureAwait(false)).ToList();
+                foreach (string qid in queryIds)
+                {
+                    if (qid != queryId)
+                    {
+                        if (timestamp.HasValue)
+                        {
+                            await DeltaTokenStore.SetDeltaTokenAsync(tableName, qid, timestamp.Value, cancellationToken).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await DeltaTokenStore.ResetDeltaTokenAsync(tableName, qid, cancellationToken).ConfigureAwait(false);
+                        }
+                    }
+                }
+            }
+        }
 
         /// <summary>
         /// Determines if the table is dirty (i.e. has pending operations)

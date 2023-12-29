@@ -116,12 +116,23 @@ namespace Microsoft.Datasync.Client.Table
         /// <param name="cancellationToken">A <see cref="CancellationToken"/> to observe.</param>
         /// <returns>A task that returns the item when complete.</returns>
         public Task<JToken> GetItemAsync(string id, CancellationToken cancellationToken = default)
+            => GetItemAsync(id, false, cancellationToken);
+
+        /// <summary>
+        /// Retrieve an item from the remote table.
+        /// </summary>
+        /// <param name="id">The ID of the item to retrieve.</param>
+        /// <param name="includeDeleted">If <c>true</c>, a soft-deleted item will be returned; if <c>false</c>, GONE is returned.</param>
+        /// <param name="cancellationToken">A <see cref="CancellationToken"/> to observe.</param>
+        /// <returns>A task that returns the item when complete.</returns>
+        public Task<JToken> GetItemAsync(string id, bool includeDeleted, CancellationToken cancellationToken = default)
         {
             Arguments.IsValidId(id, nameof(id));
+            string query = includeDeleted ? "?__includedeleted=true" : string.Empty;
             ServiceRequest request = new()
             {
                 Method = HttpMethod.Get,
-                UriPathAndQuery = $"{TableEndpoint}/{id}",
+                UriPathAndQuery = $"{TableEndpoint}/{id}{query}",
                 EnsureResponseContent = true
             };
             return SendRequestAsync(request, cancellationToken);
@@ -200,11 +211,19 @@ namespace Microsoft.Datasync.Client.Table
         protected async Task<Page<JToken>> GetNextPageAsync(string query = "", string requestUri = null, CancellationToken cancellationToken = default)
         {
             string queryString = string.IsNullOrEmpty(query) ? string.Empty : $"?{query.TrimStart('?').TrimEnd()}";
+            if (requestUri?.StartsWith("/") == true)
+            {
+                requestUri = new Uri(ServiceClient.Endpoint, requestUri).ToString();
+            }
             ServiceRequest request = new()
             {
                 Method = HttpMethod.Get,
                 UriPathAndQuery = requestUri ?? TableEndpoint + queryString,
-                EnsureResponseContent = true
+                EnsureResponseContent = true,
+                RequestHeaders = new Dictionary<string, string>
+                {
+                    { ServiceHeaders.ZumoOptions, "nextLink=path" }
+                }
             };
             var response = await SendRequestAsync(request, cancellationToken).ConfigureAwait(false);
             var result = new Page<JToken>();
@@ -220,7 +239,7 @@ namespace Microsoft.Datasync.Client.Table
                 }
                 if (response[Page.JsonNextLinkProperty]?.Type == JTokenType.String)
                 {
-                    result.NextLink = new Uri(response.Value<string>(Page.JsonNextLinkProperty));
+                    result.NextLink = response.Value<string>(Page.JsonNextLinkProperty);
                 }
             }
             return result;

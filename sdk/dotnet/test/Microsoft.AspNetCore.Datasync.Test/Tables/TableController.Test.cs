@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 using Datasync.Common.Test.Models;
+using FluentAssertions;
 using Microsoft.AspNetCore.Datasync.InMemory;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.OData.ModelBuilder;
 
 namespace Microsoft.AspNetCore.Datasync.Test.Tables;
 
@@ -33,6 +36,27 @@ public class TableController_Tests
     }
 
     [Fact]
+    public void Ctor_Accepts_EdmModel()
+    {
+        var repository = new InMemoryRepository<InMemoryMovie>();
+        var modelBuilder = new ODataConventionModelBuilder();
+        modelBuilder.AddEntityType(typeof(InMemoryMovie));
+
+        var controller = new TableController<InMemoryMovie>(repository, null, modelBuilder.GetEdmModel(), null);
+        controller.Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Ctor_Throws_InvalidEdmModel()
+    {
+        var repository = new InMemoryRepository<InMemoryMovie>();
+        var modelBuilder = new ODataConventionModelBuilder();
+
+        Action act = () => _ = new TableController<InMemoryMovie>(repository, null, modelBuilder.GetEdmModel(), null);
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
     public void IsClientSideEvaluationException_Works()
     {
         Assert.False(TableController<InMemoryMovie>.IsClientSideEvaluationException(null));
@@ -41,14 +65,33 @@ public class TableController_Tests
         Assert.False(TableController<InMemoryMovie>.IsClientSideEvaluationException(new ApplicationException()));
     }
 
-    [Fact]
-    public void CatchClientSideEvaluationException_RethrowsInnerException()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CatchClientSideEvaluationException_RethrowsInnerException(bool hasLogger)
     {
         var repository = new InMemoryRepository<InMemoryMovie>();
         var controller = new TableController<InMemoryMovie>() { Repository = repository };
+        if (hasLogger) controller.Logger = new NullLogger<TableController<InMemoryMovie>>();
 
         static void evaluator() { throw new ApplicationException(); }
 
         Assert.Throws<ApplicationException>(() => controller.CatchClientSideEvaluationException(new NotSupportedException(), "foo", evaluator));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CatchClientSideEvaluationException_ThrowsOriginalException(bool hasLogger)
+    {
+        var repository = new InMemoryRepository<InMemoryMovie>();
+        var controller = new TableController<InMemoryMovie>() { Repository = repository };
+        if (hasLogger) controller.Logger = new NullLogger<TableController<InMemoryMovie>>();
+        var exception = new ApplicationException();
+
+        static void evaluator() { throw new ApplicationException(); }
+
+        var actual = Assert.Throws<ApplicationException>(() => controller.CatchClientSideEvaluationException(exception, "foo", evaluator));
+        Assert.Same(exception, actual);
     }
 }

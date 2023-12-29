@@ -10,6 +10,7 @@ using Microsoft.Datasync.Client.Table;
 using Microsoft.Datasync.Client.Utils;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
+using SQLitePCL;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -70,6 +71,34 @@ namespace Microsoft.Datasync.Client.SQLiteStore
         /// <param name="connectionString">The connection string to use for persistent storage.</param>
         /// <param name="logger">The logger to use for logging SQL requests.</param>
         public OfflineSQLiteStore(string connectionString, ILogger logger) : this(connectionString)
+        {
+            Logger = logger;
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="OfflineSQLiteStore"/> using the provided SQLitePCL connection.
+        /// </summary>
+        /// <remarks>
+        /// This assumes you maintain all lifecycle responsibilities for the connection.  The connection is not
+        /// opened, limits are not set, and the connection is not disposed of when the store is disposed.
+        /// </remarks>
+        /// <param name="connection">The connection.</param>
+        public OfflineSQLiteStore(sqlite3 connection)
+        {
+            Arguments.IsNotNull(connection, nameof(connection));
+            DbConnection = new SqliteConnection(connection);
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="OfflineSQLiteStore"/> using the provided SQLitePCL connection.
+        /// </summary>
+        /// <remarks>
+        /// This assumes you maintain all lifecycle responsibilities for the connection.  The connection is not
+        /// opened, limits are not set, and the connection is not disposed of when the store is disposed.
+        /// </remarks>
+        /// <param name="connection">The connection.</param>
+        /// <param name="logger">The logger to use for logging SQL requests.</param>
+        public OfflineSQLiteStore(sqlite3 connection, ILogger logger) : this(connection)
         {
             Logger = logger;
         }
@@ -412,7 +441,7 @@ namespace Microsoft.Datasync.Client.SQLiteStore
             ExecuteNonQueryInternal(createTableSql);
 
             string tableInfoSql = SqlStatements.GetTableInformation(tableDefinition.TableName);
-            IDictionary<string, JObject> existingColumns = ExecuteQueryInternal(tableInfoSql).ToDictionary(c => c.Value<string>("name"), StringComparer.OrdinalIgnoreCase);
+            var existingColumns = ExecuteQueryInternal(tableInfoSql).ToDictionary(c => c.Value<string>("name"), StringComparer.OrdinalIgnoreCase);
 
             // Process changes to the table definition - column(s) added
             foreach (var column in tableDefinition.Columns.Where(c => !existingColumns.ContainsKey(c.Name)))

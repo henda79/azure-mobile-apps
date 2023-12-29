@@ -105,9 +105,19 @@ namespace Microsoft.Datasync.Client.Table
         /// <param name="id">The ID of the item to retrieve.</param>
         /// <param name="cancellationToken">A <see cref="CancellationToken"/> to observe.</param>
         /// <returns>A task that returns the item when complete.</returns>
-        public new async Task<T> GetItemAsync(string id, CancellationToken cancellationToken = default)
+        public new Task<T> GetItemAsync(string id, CancellationToken cancellationToken = default)
+            => GetItemAsync(id, false, cancellationToken);
+
+        /// <summary>
+        /// Retrieve an item from the remote table.
+        /// </summary>
+        /// <param name="id">The ID of the item to retrieve.</param>
+        /// <param name="includeDeleted">If <c>true</c>, a soft-deleted item will be returned; if <c>false</c>, GONE is returned.</param>
+        /// <param name="cancellationToken">A <see cref="CancellationToken"/> to observe.</param>
+        /// <returns>A task that returns the item when complete.</returns>
+        public new async Task<T> GetItemAsync(string id, bool includeDeleted, CancellationToken cancellationToken = default)
         {
-            JToken value = await base.GetItemAsync(id, cancellationToken).ConfigureAwait(false);
+            JToken value = await base.GetItemAsync(id, includeDeleted, cancellationToken).ConfigureAwait(false);
             return ServiceClient.Serializer.Deserialize<T>(value);
         }
 
@@ -285,7 +295,6 @@ namespace Microsoft.Datasync.Client.Table
         public ITableQuery<T> WithParameters(IEnumerable<KeyValuePair<string, string>> parameters)
             => CreateQuery().WithParameters(parameters);
 
-
         /// <summary>
         /// Count the number of items that would be returned by the provided query, without returning all the values.
         /// </summary>
@@ -312,9 +321,12 @@ namespace Microsoft.Datasync.Client.Table
         internal async Task<Page<U>> GetNextPageAsync<U>(string query, string nextLink, CancellationToken cancellationToken = default)
         {
             Page<JToken> json = await base.GetNextPageAsync(query, nextLink, cancellationToken).ConfigureAwait(false);
-            Page<U> result = new() { Count = json.Count, NextLink = json.NextLink };
-            result.Items = json.Items?.Select(item => ServiceClient.Serializer.Deserialize<U>(item));
-            return result;
+            return new()
+            {
+                Count = json.Count,
+                NextLink = json.NextLink,
+                Items = json.Items?.Select(item => ServiceClient.Serializer.Deserialize<U>(item))
+            };
         }
 
         /// <summary>

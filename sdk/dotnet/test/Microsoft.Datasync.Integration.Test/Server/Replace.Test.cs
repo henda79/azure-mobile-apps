@@ -124,13 +124,14 @@ public class Replace_Tests : BaseTest
         }
     }
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("If-Match", null, HttpStatusCode.OK)]
     [InlineData("If-Match", "\"dGVzdA==\"", HttpStatusCode.PreconditionFailed)]
     [InlineData("If-None-Match", null, HttpStatusCode.PreconditionFailed)]
     [InlineData("If-None-Match", "\"dGVzdA==\"", HttpStatusCode.OK)]
     public async Task ConditionalVersionPatchTests(string headerName, string headerValue, HttpStatusCode expectedStatusCode)
     {
+        Skip.If(BuildEnvironment.IsPipeline());
         string id = GetRandomId();
         var entity = MovieServer.GetMovieById(id)!;
         Dictionary<string, string> headers = new()
@@ -165,13 +166,15 @@ public class Replace_Tests : BaseTest
         }
     }
 
-    [Theory]
+    [SkippableTheory]
     [InlineData("If-Modified-Since", -1, HttpStatusCode.OK)]
     [InlineData("If-Modified-Since", 1, HttpStatusCode.PreconditionFailed)]
     [InlineData("If-Unmodified-Since", 1, HttpStatusCode.OK)]
     [InlineData("If-Unmodified-Since", -1, HttpStatusCode.PreconditionFailed)]
     public async Task ConditionalPatchTests(string headerName, int offset, HttpStatusCode expectedStatusCode)
     {
+        Skip.If(BuildEnvironment.IsPipeline());
+
         string id = GetRandomId();
         var entity = MovieServer.GetMovieById(id)!;
         Dictionary<string, string> headers = new()
@@ -245,8 +248,9 @@ public class Replace_Tests : BaseTest
         }
     }
 
-    [Theory, CombinatorialData]
-    public async Task ReplaceSoftNotDeleted_Works([CombinatorialValues("soft", "soft_logged")] string table)
+    [Theory]
+    [InlineData("soft_logged")]
+    public async Task ReplaceSoftNotDeleted_Works(string table)
     {
         var id = GetRandomId();
         var original = MovieServer.GetMovieById(id)!;

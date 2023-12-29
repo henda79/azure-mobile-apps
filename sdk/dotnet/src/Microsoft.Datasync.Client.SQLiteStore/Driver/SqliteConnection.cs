@@ -20,6 +20,11 @@ namespace Microsoft.Datasync.Client.SQLiteStore.Driver
         internal static bool sqliteIsInitialized;
 
         /// <summary>
+        /// Set to <c>true</c> if we need to dispose of the sqlite3 connection.
+        /// </summary>
+        internal bool handleSqliteLifecycle;
+
+        /// <summary>
         /// The SQLite database connection.
         /// </summary>
         internal sqlite3 connection;
@@ -51,6 +56,7 @@ namespace Microsoft.Datasync.Client.SQLiteStore.Driver
                 }
 
                 sqliteIsInitialized = true;
+                handleSqliteLifecycle = true;
             }
 
             int rc = raw.sqlite3_open(connectionString, out connection);
@@ -65,6 +71,21 @@ namespace Microsoft.Datasync.Client.SQLiteStore.Driver
         }
 
         /// <summary>
+        /// Creates a new <see cref="SqliteConnection"/> to execute SQLite commands using an existing open sqlite3 connection.
+        /// </summary>
+        /// <remarks>
+        /// This assumes you maintain all lifecycle responsibilities for the connection.  The connection is not
+        /// opened, limits are not set, and the connection is not disposed of when the store is disposed.
+        /// </remarks>
+        /// <param name="connection">The sqlite3 connection to use.</param>
+        public SqliteConnection(sqlite3 connection)
+        {
+            this.connection = connection;
+            sqliteIsInitialized = true;
+            handleSqliteLifecycle = false;
+        }
+
+        /// <summary>
         /// Prepares a SQL statement for use.
         /// </summary>
         /// <param name="sqlStatement">The SQL statement to prepare.</param>
@@ -76,7 +97,8 @@ namespace Microsoft.Datasync.Client.SQLiteStore.Driver
             int rc = raw.sqlite3_prepare_v2(connection, sqlStatement, out sqlite3_stmt stmt);
             if (rc != raw.SQLITE_OK)
             {
-                throw new SQLiteException($"Cannot prepare statement for '{sqlStatement}'", rc, connection);
+                var errmsg = raw.sqlite3_errstr(rc).utf8_to_string();
+                throw new SQLiteException($"Cannot prepare statement for '{sqlStatement}': {rc} {errmsg}", rc, connection);
             }
 
             return new SqliteStatement(connection, stmt);
@@ -87,7 +109,8 @@ namespace Microsoft.Datasync.Client.SQLiteStore.Driver
         {
             if (disposing)
             {
-                raw.sqlite3_close_v2(connection);
+                if (handleSqliteLifecycle)
+                    raw.sqlite3_close_v2(connection);
                 connection = null;
             }
         }
