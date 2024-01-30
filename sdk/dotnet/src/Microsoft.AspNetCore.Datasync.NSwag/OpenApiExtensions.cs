@@ -27,7 +27,7 @@ namespace Microsoft.AspNetCore.Datasync.NSwag
         public static void AddDatasyncProcessors(this AspNetCoreOpenApiDocumentGeneratorSettings settings)
         {
             settings.OperationProcessors.Add(new DatasyncOperationProcessor());
-            settings.SchemaProcessors.Add(new DatasyncSchemaProcessor());
+            settings.SchemaSettings.SchemaProcessors.Add(new DatasyncSchemaProcessor());
         }
 
         /// <summary>
